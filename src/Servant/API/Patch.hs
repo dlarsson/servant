@@ -1,19 +1,21 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
-module Servant.API.Post where
+module Servant.API.Patch where
 
 import Data.Typeable ( Typeable )
 
--- | Endpoint for POST requests. The type variable represents the type of the
+-- | Endpoint for PATCH requests. The type variable represents the type of the
 -- response body (not the request body, use 'Servant.API.ReqBody.ReqBody' for
 -- that).
 --
+-- If the HTTP response is empty, only () is supported.
+--
 -- Example:
 --
--- >            -- POST /books
+-- >            -- PATCH /books
 -- >            -- with a JSON encoded Book as the request body
 -- >            -- returning the just-created Book
--- > type MyApi = "books" :> ReqBody Book :> Post '[JSON] Book
-data Post (contentTypes::[*]) a
+-- > type MyApi = "books" :> ReqBody Book :> Patch '[JSON] Book
+data Patch (contentTypes::[*]) a
   deriving Typeable
