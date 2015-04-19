@@ -9,26 +9,82 @@
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE TypeOperators         #-}
 {-# LANGUAGE UndecidableInstances  #-}
-module Servant.API.ContentTypes where
 
-import           Control.Arrow           (left)
+-- | A collection of basic Content-Types (also known as Internet Media
+-- Types, or MIME types). Additionally, this module provides classes that
+-- encapsulate how to serialize or deserialize values to or from
+-- a particular Content-Type.
+--
+-- Content-Types are used in `ReqBody` and the method combinators:
+--
+-- >>> type MyEndpoint = ReqBody '[JSON, PlainText] Book :> Get '[JSON, PlainText] :> Book
+--
+-- Meaning the endpoint accepts requests of Content-Type @application/json@
+-- or @text/plain;charset-utf8@, and returns data in either one of those
+-- formats (depending on the @Accept@ header).
+--
+-- If you would like to support Content-Types beyond those provided here,
+-- then:
+--
+--      (1) Declare a new data type with no constructors (e.g. @data HTML@).
+--      (2) Make an instance of it for `Accept`.
+--      (3) If you want to be able to serialize data *into* that
+--      Content-Type, make an instance of it for `MimeRender`.
+--      (4) If you want to be able to deserialize data *from* that
+--      Content-Type, make an instance of it for `MimeUnrender`.
+--
+-- Note that roles are reversed in @servant-server@ and @servant-client@:
+-- to be able to serve (or even typecheck) a @Get '[JSON, XML] MyData@,
+-- you'll need to have the appropriate `MimeRender` instances in scope,
+-- whereas to query that endpoint with @servant-client@, you'll need
+-- a `MimeUnrender` instance in scope.
+module Servant.API.ContentTypes
+    (
+    -- * Provided Content-Types
+      JSON
+    , PlainText
+    , FormUrlEncoded
+    , OctetStream
+
+    -- * Building your own Content-Type
+    , Accept(..)
+    , MimeRender(..)
+    , MimeUnrender(..)
+
+    -- * Internal
+    , AcceptHeader(..)
+    , AllCTRender(..)
+    , AllCTUnrender(..)
+    , AllMimeRender(..)
+    , AllMimeUnrender(..)
+    , FromFormUrlEncoded(..)
+    , ToFormUrlEncoded(..)
+    , IsNonEmpty
+    , eitherDecodeLenient
+    ) where
+
+import           Control.Applicative        ((<*))
+import           Control.Arrow              (left)
 import           Control.Monad
-import           Data.Aeson              (FromJSON, ToJSON, eitherDecode,
-                                          encode)
-import qualified Data.ByteString         as BS
-import           Data.ByteString.Lazy    (ByteString, fromStrict, toStrict)
-import qualified Data.ByteString.Lazy    as B
-import           Data.String.Conversions (cs)
+import           Data.Aeson                 (FromJSON, ToJSON, Value,
+                                             encode, parseJSON)
+import           Data.Aeson.Parser          (value)
+import           Data.Aeson.Types           (parseEither)
+import           Data.Attoparsec.ByteString (endOfInput, parseOnly)
+import qualified Data.ByteString            as BS
+import           Data.ByteString.Lazy       (ByteString, fromStrict, toStrict)
+import qualified Data.ByteString.Lazy       as B
 import           Data.Monoid
-import qualified Data.Text.Lazy          as TextL
-import qualified Data.Text.Lazy.Encoding as TextL
-import qualified Data.Text               as TextS
-import qualified Data.Text.Encoding      as TextS
+import           Data.String.Conversions    (cs)
+import qualified Data.Text                  as TextS
+import qualified Data.Text.Encoding         as TextS
+import qualified Data.Text.Lazy             as TextL
+import qualified Data.Text.Lazy.Encoding    as TextL
 import           Data.Typeable
-import           GHC.Exts                (Constraint)
-import qualified Network.HTTP.Media      as M
-import           Network.URI             (unEscapeString, escapeURIString,
-                                          isUnreserved)
+import           GHC.Exts                   (Constraint)
+import qualified Network.HTTP.Media         as M
+import           Network.URI                (escapeURIString, isUnreserved,
+                                             unEscapeString)
 
 -- * Provided content types
 data JSON deriving Typeable
@@ -44,8 +100,12 @@ data OctetStream deriving Typeable
 --
 -- Example:
 --
--- > instance Accept HTML where
--- >    contentType _ = "text" // "html"
+-- >>> import Network.HTTP.Media ((//), (/:))
+-- >>> data HTML
+-- >>> :{
+--instance Accept HTML where
+--    contentType _ = "text" // "html" /: ("charset", "utf-8")
+-- :}
 --
 class Accept ctype where
     contentType   :: Proxy ctype -> M.MediaType
@@ -82,14 +142,14 @@ newtype AcceptHeader = AcceptHeader BS.ByteString
 -- >    contentType _ = "example" // "prs.me.mine" /: ("charset", "utf-8")
 -- >
 -- > instance Show a => MimeRender MyContentType where
--- >    toByteString _ val = pack ("This is MINE! " ++ show val)
+-- >    mimeRender _ val = pack ("This is MINE! " ++ show val)
 -- >
 -- > type MyAPI = "path" :> Get '[MyContentType] Int
 --
 class Accept ctype => MimeRender ctype a where
-    toByteString  :: Proxy ctype -> a -> ByteString
+    mimeRender  :: Proxy ctype -> a -> ByteString
 
-class AllCTRender list a where
+class AllCTRender (list :: [*]) a where
     -- If the Accept header can be matched, returns (Just) a tuple of the
     -- Content-Type and response (serialization of @a@ into the appropriate
     -- mimetype).
@@ -109,20 +169,28 @@ instance ( AllMimeRender ctyps a, IsNonEmpty ctyps
 -- | Instantiate this class to register a way of deserializing a type based
 -- on the request's @Content-Type@ header.
 --
--- > data MyContentType = MyContentType String
--- >
--- > instance Accept MyContentType where
--- >    contentType _ = "example" // "prs.me.mine" /: ("charset", "utf-8")
--- >
--- > instance Show a => MimeUnrender MyContentType where
--- >    fromByteString _ bs = MyContentType $ unpack bs
--- >
--- > type MyAPI = "path" :> ReqBody '[MyContentType] :> Get '[JSON] Int
+-- >>> import Network.HTTP.Media hiding (Accept)
+-- >>> import qualified Data.ByteString.Lazy.Char8 as BSC
+-- >>> data MyContentType = MyContentType String
+--
+-- >>> :{
+--instance Accept MyContentType where
+--    contentType _ = "example" // "prs.me.mine" /: ("charset", "utf-8")
+-- :}
+--
+-- >>> :{
+--instance Read a => MimeUnrender MyContentType a where
+--    mimeUnrender _ bs = case BSC.take 12 bs of
+--      "MyContentType" -> return . read . BSC.unpack $ BSC.drop 12 bs
+--      _ -> Left "didn't start with the magic incantation"
+-- :}
+--
+-- >>> type MyAPI = "path" :> ReqBody '[MyContentType] Int :> Get '[JSON] Int
 --
 class Accept ctype => MimeUnrender ctype a where
-    fromByteString :: Proxy ctype -> ByteString -> Either String a
+    mimeUnrender :: Proxy ctype -> ByteString -> Either String a
 
-class (IsNonEmpty list) => AllCTUnrender list a where
+class (IsNonEmpty list) => AllCTUnrender (list :: [*]) a where
     handleCTypeH :: Proxy list
                  -> ByteString     -- Content-Type header
                  -> ByteString     -- Request body
@@ -140,19 +208,19 @@ instance ( AllMimeUnrender ctyps a, IsNonEmpty ctyps
 --------------------------------------------------------------------------
 -- Check that all elements of list are instances of MimeRender
 --------------------------------------------------------------------------
-class AllMimeRender ls a where
-    allMimeRender :: Proxy ls
+class AllMimeRender (list :: [*]) a where
+    allMimeRender :: Proxy list
                   -> a                              -- value to serialize
                   -> [(M.MediaType, ByteString)]    -- content-types/response pairs
 
 instance ( MimeRender ctyp a ) => AllMimeRender '[ctyp] a where
-    allMimeRender _ a = [(contentType pctyp, toByteString pctyp a)]
+    allMimeRender _ a = [(contentType pctyp, mimeRender pctyp a)]
         where pctyp = Proxy :: Proxy ctyp
 
 instance ( MimeRender ctyp a
          , AllMimeRender (ctyp' ': ctyps) a
          ) => AllMimeRender (ctyp ': ctyp' ': ctyps) a where
-    allMimeRender _ a = (contentType pctyp, toByteString pctyp a)
+    allMimeRender _ a = (contentType pctyp, mimeRender pctyp a)
                        :(allMimeRender pctyps a)
         where pctyp = Proxy :: Proxy ctyp
               pctyps = Proxy :: Proxy (ctyp' ': ctyps)
@@ -164,8 +232,10 @@ instance AllMimeRender '[] a where
 --------------------------------------------------------------------------
 -- Check that all elements of list are instances of MimeUnrender
 --------------------------------------------------------------------------
-class AllMimeUnrender ls a where
-    allMimeUnrender :: Proxy ls -> ByteString -> [(M.MediaType, Either String a)]
+class AllMimeUnrender (list :: [*]) a where
+    allMimeUnrender :: Proxy list
+                    -> ByteString
+                    -> [(M.MediaType, Either String a)]
 
 instance AllMimeUnrender '[] a where
     allMimeUnrender _ _ = []
@@ -173,12 +243,12 @@ instance AllMimeUnrender '[] a where
 instance ( MimeUnrender ctyp a
          , AllMimeUnrender ctyps a
          ) => AllMimeUnrender (ctyp ': ctyps) a where
-    allMimeUnrender _ val = (contentType pctyp, fromByteString pctyp val)
+    allMimeUnrender _ val = (contentType pctyp, mimeUnrender pctyp val)
                            :(allMimeUnrender pctyps val)
         where pctyp = Proxy :: Proxy ctyp
               pctyps = Proxy :: Proxy ctyps
 
-type family IsNonEmpty (ls::[*]) :: Constraint where
+type family IsNonEmpty (list :: [*]) :: Constraint where
     IsNonEmpty (x ': xs)   = ()
 
 
@@ -187,55 +257,66 @@ type family IsNonEmpty (ls::[*]) :: Constraint where
 
 -- | `encode`
 instance ToJSON a => MimeRender JSON a where
-    toByteString _ = encode
+    mimeRender _ = encode
 
--- | `encodeFormUrlEncoded . toFormUrlEncoded`
+-- | @encodeFormUrlEncoded . toFormUrlEncoded@
+-- Note that the @mimeUnrender p (mimeRender p x) == Right x@ law only
+-- holds if every element of x is non-null (i.e., not @("", "")@)
 instance ToFormUrlEncoded a => MimeRender FormUrlEncoded a where
-    toByteString _ = encodeFormUrlEncoded . toFormUrlEncoded
+    mimeRender _ = encodeFormUrlEncoded . toFormUrlEncoded
 
 -- | `TextL.encodeUtf8`
 instance MimeRender PlainText TextL.Text where
-    toByteString _ = TextL.encodeUtf8
+    mimeRender _ = TextL.encodeUtf8
 
--- | `fromStrict . TextS.encodeUtf8`
+-- | @fromStrict . TextS.encodeUtf8@
 instance MimeRender PlainText TextS.Text where
-    toByteString _ = fromStrict . TextS.encodeUtf8
+    mimeRender _ = fromStrict . TextS.encodeUtf8
 
--- | `id`
+-- | @id@
 instance MimeRender OctetStream ByteString where
-    toByteString _ = id
+    mimeRender _ = id
 
 -- | `fromStrict`
 instance MimeRender OctetStream BS.ByteString where
-    toByteString _ = fromStrict
+    mimeRender _ = fromStrict
 
 
 --------------------------------------------------------------------------
 -- * MimeUnrender Instances
 
+-- | Like 'Data.Aeson.eitherDecode' but allows all JSON values instead of just
+-- objects and arrays.
+eitherDecodeLenient :: FromJSON a => ByteString -> Either String a
+eitherDecodeLenient input = do
+    v :: Value <- parseOnly (Data.Aeson.Parser.value <* endOfInput) (cs input)
+    parseEither parseJSON v
+
 -- | `eitherDecode`
 instance FromJSON a => MimeUnrender JSON a where
-    fromByteString _ = eitherDecode
+    mimeUnrender _ = eitherDecodeLenient
 
--- | `decodeFormUrlEncoded >=> fromFormUrlEncoded`
+-- | @decodeFormUrlEncoded >=> fromFormUrlEncoded@
+-- Note that the @mimeUnrender p (mimeRender p x) == Right x@ law only
+-- holds if every element of x is non-null (i.e., not @("", "")@)
 instance FromFormUrlEncoded a => MimeUnrender FormUrlEncoded a where
-    fromByteString _ = decodeFormUrlEncoded >=> fromFormUrlEncoded
+    mimeUnrender _ = decodeFormUrlEncoded >=> fromFormUrlEncoded
 
--- | `left show . TextL.decodeUtf8'`
+-- | @left show . TextL.decodeUtf8'@
 instance MimeUnrender PlainText TextL.Text where
-    fromByteString _ = left show . TextL.decodeUtf8'
+    mimeUnrender _ = left show . TextL.decodeUtf8'
 
--- | `left show . TextS.decodeUtf8' . toStrict`
+-- | @left show . TextS.decodeUtf8' . toStrict@
 instance MimeUnrender PlainText TextS.Text where
-    fromByteString _ = left show . TextS.decodeUtf8' . toStrict
+    mimeUnrender _ = left show . TextS.decodeUtf8' . toStrict
 
--- | `Right . id`
+-- | @Right . id@
 instance MimeUnrender OctetStream ByteString where
-    fromByteString _ = Right . id
+    mimeUnrender _ = Right . id
 
--- | `Right . toStrict`
+-- | @Right . toStrict@
 instance MimeUnrender OctetStream BS.ByteString where
-    fromByteString _ = Right . toStrict
+    mimeUnrender _ = Right . toStrict
 
 
 --------------------------------------------------------------------------
@@ -281,3 +362,10 @@ decodeFormUrlEncoded q = do
         unescape :: TextS.Text -> TextS.Text
         unescape = cs . unEscapeString . cs . TextS.intercalate "%20" . TextS.splitOn "+"
     mapM parsePair xs
+
+-- $setup
+-- >>> import Servant.API
+-- >>> import Data.Aeson
+-- >>> import Data.Text
+-- >>> data Book
+-- >>> instance ToJSON Book where { toJSON = undefined }

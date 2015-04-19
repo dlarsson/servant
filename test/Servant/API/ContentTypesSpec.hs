@@ -8,22 +8,24 @@ module Servant.API.ContentTypesSpec where
 import           Control.Applicative
 import           Control.Arrow
 import           Data.Aeson
-import           Data.Function            (on)
+import           Data.Aeson.Parser          (jstring)
+import           Data.Attoparsec.ByteString (parseOnly)
+import           Data.Function              (on)
 import           Data.Proxy
 
-import           Data.ByteString.Char8    (ByteString, append, pack)
-import qualified Data.ByteString.Lazy     as BSL
-import           Data.List                (maximumBy)
-import           Data.Maybe               (fromJust, isJust, isNothing)
-import           Data.String              (IsString (..))
-import           Data.String.Conversions  (cs)
-import qualified Data.Text                as TextS
-import qualified Data.Text.Lazy           as TextL
+import           Data.ByteString.Char8      (ByteString, append, pack)
+import qualified Data.ByteString.Lazy       as BSL
+import           Data.List                  (maximumBy)
+import           Data.Maybe                 (fromJust, isJust, isNothing)
+import           Data.String                (IsString (..))
+import           Data.String.Conversions    (cs)
+import qualified Data.Text                  as TextS
+import qualified Data.Text.Lazy             as TextL
 import           GHC.Generics
-import           Network.URL              (importParams, exportParams)
+import           Network.URL                (exportParams, importParams)
 import           Test.Hspec
 import           Test.QuickCheck
-import           Test.QuickCheck.Instances ()
+import           Test.QuickCheck.Instances  ()
 
 import           Servant.API.ContentTypes
 
@@ -32,49 +34,55 @@ spec = describe "Servant.API.ContentTypes" $ do
 
     describe "The JSON Content-Type type" $ do
 
-        it "has fromByteString reverse toByteString for valid top-level json ([Int]) " $ do
+        it "has mimeUnrender reverse mimeRender for valid top-level json ([Int]) " $ do
             let p = Proxy :: Proxy JSON
-            property $ \x -> fromByteString p (toByteString p x) == Right (x::[Int])
+            property $ \x -> mimeUnrender p (mimeRender p x) == Right (x::[Int])
 
-        it "has fromByteString reverse toByteString for valid top-level json " $ do
+        it "has mimeUnrender reverse mimeRender for valid top-level json " $ do
             let p = Proxy :: Proxy JSON
-            property $ \x -> fromByteString p (toByteString p x) == Right (x::SomeData)
+            property $ \x -> mimeUnrender p (mimeRender p x) == Right (x::SomeData)
 
     describe "The FormUrlEncoded Content-Type type" $ do
 
-        it "has fromByteString reverse toByteString" $ do
-            let p = Proxy :: Proxy FormUrlEncoded
-            property $ \x -> fromByteString p (toByteString p x) == Right (x::[(TextS.Text,TextS.Text)])
+        let isNonNull ("", "") = False
+            isNonNull _        = True
 
-        it "has fromByteString reverse exportParams (Network.URL)" $ do
+        it "has mimeUnrender reverse mimeRender" $ do
             let p = Proxy :: Proxy FormUrlEncoded
-            property $ \x -> (fromByteString p . cs . exportParams . map (cs *** cs) $ x) == Right (x::[(TextS.Text,TextS.Text)])
+            property $ \x -> all isNonNull x
+                ==> mimeUnrender p (mimeRender p x) == Right (x::[(TextS.Text,TextS.Text)])
 
-        it "has importParams (Network.URL) reverse toByteString" $ do
+        it "has mimeUnrender reverse exportParams (Network.URL)" $ do
             let p = Proxy :: Proxy FormUrlEncoded
-            property $ \x -> (fmap (map (cs *** cs)) . importParams . cs . toByteString p $ x) == Just (x::[(TextS.Text,TextS.Text)])
+            property $ \x -> all isNonNull x
+                ==> (mimeUnrender p . cs . exportParams . map (cs *** cs) $ x) == Right (x::[(TextS.Text,TextS.Text)])
+
+        it "has importParams (Network.URL) reverse mimeRender" $ do
+            let p = Proxy :: Proxy FormUrlEncoded
+            property $ \x -> all isNonNull x
+                ==> (fmap (map (cs *** cs)) . importParams . cs . mimeRender p $ x) == Just (x::[(TextS.Text,TextS.Text)])
 
     describe "The PlainText Content-Type type" $ do
 
-        it "has fromByteString reverse toByteString (lazy Text)" $ do
+        it "has mimeUnrender reverse mimeRender (lazy Text)" $ do
             let p = Proxy :: Proxy PlainText
-            property $ \x -> fromByteString p (toByteString p x) == Right (x::TextL.Text)
+            property $ \x -> mimeUnrender p (mimeRender p x) == Right (x::TextL.Text)
 
-        it "has fromByteString reverse toByteString (strict Text)" $ do
+        it "has mimeUnrender reverse mimeRender (strict Text)" $ do
             let p = Proxy :: Proxy PlainText
-            property $ \x -> fromByteString p (toByteString p x) == Right (x::TextS.Text)
+            property $ \x -> mimeUnrender p (mimeRender p x) == Right (x::TextS.Text)
 
     describe "The OctetStream Content-Type type" $ do
 
         it "is id (Lazy ByteString)" $ do
             let p = Proxy :: Proxy OctetStream
-            property $ \x -> toByteString p x == (x :: BSL.ByteString)
-                && fromByteString p x == Right x
+            property $ \x -> mimeRender p x == (x :: BSL.ByteString)
+                && mimeUnrender p x == Right x
 
         it "is fromStrict/toStrict (Strict ByteString)" $ do
             let p = Proxy :: Proxy OctetStream
-            property $ \x -> toByteString p x == BSL.fromStrict (x :: ByteString)
-                && fromByteString p (BSL.fromStrict x) == Right x
+            property $ \x -> mimeRender p x == BSL.fromStrict (x :: ByteString)
+                && mimeUnrender p (BSL.fromStrict x) == Right x
 
     describe "handleAcceptH" $ do
 
@@ -148,6 +156,14 @@ spec = describe "Servant.API.ContentTypes" $ do
                     (encode val)
                     `shouldBe` Just (Right val)
 
+    describe "eitherDecodeLenient" $ do
+
+        it "parses top-level strings" $ do
+            let toMaybe = either (const Nothing) Just
+            -- The Left messages differ, so convert to Maybe
+            property $ \x -> toMaybe (eitherDecodeLenient x)
+                `shouldBe` toMaybe (parseOnly jstring $ cs x)
+
 
 data SomeData = SomeData { record1 :: String, record2 :: Int }
     deriving (Generic, Eq, Show)
@@ -166,13 +182,13 @@ instance Arbitrary ZeroToOne where
     arbitrary = ZeroToOne <$> elements [ x / 10 | x <- [1..10]]
 
 instance MimeRender OctetStream Int where
-    toByteString _ = cs . show
+    mimeRender _ = cs . show
 
 instance MimeRender PlainText Int where
-    toByteString _ = cs . show
+    mimeRender _ = cs . show
 
 instance MimeRender PlainText ByteString where
-    toByteString _ = cs
+    mimeRender _ = cs
 
 instance ToJSON ByteString where
     toJSON x = object [ "val" .= x ]
