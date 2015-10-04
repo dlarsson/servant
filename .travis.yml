@@ -1,35 +1,27 @@
-language: haskell
+sudo: false
 
-ghc:
-  - 7.8
+addons:
+  apt:
+    packages:
+      - libgmp-dev
 
-before_install:
-  - cabal update
-  - cabal sandbox init
+env:
+  - STACK_YAML=stack-ghc-7.8.4.yaml
+  - STACK_YAML=stack.yaml
 
 install:
-  - cabal install --only-dependencies --enable-tests
+  # stack
+  - mkdir -p ~/.local/bin
+  - travis_retry curl -L https://github.com/commercialhaskell/stack/releases/download/v0.1.4.0/stack-0.1.4.0-x86_64-linux.tar.gz | tar -xvzf -
+  - mv stack ~/.local/bin
+  - export PATH=~/.local/bin:$PATH
+  - stack --version
 
 script:
-  - cabal configure --enable-tests --enable-library-coverage && cabal build && cabal test
-  - cabal check
-  - cabal sdist
+  - stack setup
+  - stack build --ghc-options "-Werror"
+  - stack test
 
-after_script:
-  - |
-    if [ "$TRAVIS_PULL_REQUEST" -eq "$TRAVIS_PULL_REQUEST" ] 2>/dev/null || [ "$TRAVIS_BRANCH" == "master" ] ; then
-      cabal install hpc-coveralls
-      hpc-coveralls --exclude-dir=test spec doctests
-    fi
-
-
-notifications:
-  irc:
-    channels:
-      - "irc.freenode.org#servant"
-    template:
-      - "%{repository}#%{build_number} - %{commit} on %{branch} by %{author}: %{message}"
-      - "Build details: %{build_url} - Change view: %{compare_url}"
-    skip_join: true
-    on_success: change
-    on_failure: always
+cache:
+  directories:
+    - $HOME/.stack
